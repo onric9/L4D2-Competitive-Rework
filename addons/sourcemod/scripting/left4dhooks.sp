@@ -1,6 +1,6 @@
 /*
 *	Left 4 DHooks Direct
-*	Copyright (C) 2024 Silvers
+*	Copyright (C) 2025 Silvers
 *
 *	This program is free software: you can redistribute it and/or modify
 *	it under the terms of the GNU General Public License as published by
@@ -18,8 +18,8 @@
 
 
 
-#define PLUGIN_VERSION		"1.151"
-#define PLUGIN_VERLONG		1151
+#define PLUGIN_VERSION		"1.160"
+#define PLUGIN_VERLONG		1160
 
 #define DEBUG				0
 // #define DEBUG			1	// Prints addresses + detour info (only use for debugging, slows server down).
@@ -29,7 +29,7 @@
 
 #define KILL_VSCRIPT		0	// 0=Keep VScript entity after using for "GetVScriptOutput". 1=Kill the entity after use (more resourceful to keep recreating, use if you're maxing out entities and reaching the limit regularly).
 
-#define ALLOW_UPDATER		1	// 0=Off. 1=Allow the plugin to auto-update using the "Updater" plugin by "GoD-Tony". 2=Allow updating and reloading after update.
+#define ALLOW_UPDATER		0	// 0=Off. 1=Allow the plugin to auto-update using the "Updater" plugin by "GoD-Tony". 2=Allow updating and reloading after update.
 
 
 
@@ -278,6 +278,7 @@ int g_iOff_m_PlayerAnimState;
 int g_iOff_m_eCurrentMainSequenceActivity;
 int g_iOff_m_bIsCustomSequence;
 int g_iOff_m_iCampaignScores;
+int g_iOff_m_iCampaignScores2;
 int g_iOff_m_fTankSpawnFlowPercent;
 int g_iOff_m_fWitchSpawnFlowPercent;
 int g_iOff_m_iTankPassedCount;
@@ -293,6 +294,7 @@ int g_iOff_m_bFirstSurvivorLeftStartArea;
 int g_iOff_m_preIncapacitatedHealth;
 int g_iOff_m_preIncapacitatedHealthBuffer;
 int g_iOff_m_maxFlames;
+int g_iOff_Intensity;
 int g_iOff_m_flow;
 int g_iOff_m_PendingMobCount;
 int g_iOff_m_nFirstClassIndex;
@@ -302,6 +304,11 @@ int g_iOff_m_bInIntro;
 int g_iOff_m_attributeFlags;
 int g_iOff_m_spawnAttributes;
 int g_iOff_NavAreaID;
+
+Address g_pCTerrorPlayer_RoundRespawn;
+int g_iOff_RespawnPlayer;
+int g_iSize_RespawnPlayer;
+int g_iByte_RespawnPlayer;
 // int g_iOff_m_iClrRender; // NULL PTR - METHOD (kept for demonstration)
 // int ClearTeamScore_A;
 // int ClearTeamScore_B;
@@ -325,6 +332,10 @@ int g_pScriptedEventManager;
 int g_pVersusMode;
 int g_pSurvivalMode;
 int g_pScavengeMode;
+int g_pItemManager;
+int g_pMusicBanks;
+int g_pSessionManager;
+int g_pChallengeMode;
 Address g_pServer;
 Address g_pAmmoDef;
 Address g_pDirector;
@@ -350,6 +361,8 @@ int g_iCanBecomeGhostOffset;
 // Other
 Address g_pScriptId;
 int g_iCancelStagger[MAXPLAYERS+1];
+int g_iClientDeathModel[MAXPLAYERS+1];
+int g_iDeathModel;
 int g_iPlayerResourceRef;
 int g_iOffsetAmmo;
 int g_iPrimaryAmmoType;
@@ -363,6 +376,7 @@ bool g_bLeft4Dead2;
 bool g_bFinalCheck;
 bool g_bMapStarted;
 bool g_bRoundEnded;
+bool g_bBreakable;
 bool g_bCheckpointFirst[MAXPLAYERS+1];
 bool g_bCheckpointLast[MAXPLAYERS+1];
 ConVar g_hCvar_VScriptBuffer;
@@ -720,6 +734,10 @@ public void OnPluginStart()
 		HookEvent("player_entered_checkpoint",		Event_EnteredCheckpoint);
 		HookEvent("player_left_checkpoint",			Event_LeftCheckpoint);
 	}
+	else
+	{
+		HookEvent("player_death",					Event_PlayerDeath);
+	}
 }
 
 void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -780,6 +798,12 @@ void Event_LeftCheckpoint(Event event, const char[] name, bool dontBroadcast)
 	}
 }
 
+void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = event.GetInt("userid");
+	g_iClientDeathModel[GetClientOfUserId(client)] = g_iDeathModel;
+}
+
 
 
 // ====================================================================================================
@@ -817,6 +841,13 @@ void ResetVars()
 			if( g_iCancelStagger[i] )
 				SDKUnhook(i, SDKHook_PostThinkPost, OnThinkCancelStagger);
 			g_iCancelStagger[i] = 0;
+		}
+	}
+	else
+	{
+		for( int i = 1; i <= MaxClients; i++ )
+		{
+			g_iClientDeathModel[i] = 0;
 		}
 	}
 }
@@ -980,10 +1011,13 @@ public void OnMapEnd()
 	{
 		hPlug = ReadPlugin(hIter);
 
-		for( int i = 1; i <= MaxClients; i++ )
+		if( hPlug )
 		{
-			g_hAnimationCallbackPre[i].RemoveAllFunctions(hPlug);
-			g_hAnimationCallbackPost[i].RemoveAllFunctions(hPlug);
+			for( int i = 1; i <= MaxClients; i++ )
+			{
+				g_hAnimationCallbackPre[i].RemoveAllFunctions(hPlug);
+				g_hAnimationCallbackPost[i].RemoveAllFunctions(hPlug);
+			}
 		}
 	}
 
@@ -1327,7 +1361,7 @@ void AddonsDisabler_Unpatch()
 // ====================================================================================================
 //										ADDONS DISABLER DETOUR
 // ====================================================================================================
-MRESReturn DTR_AddonsDisabler(int pThis, Handle hReturn, DHookParam hParams) // Forward "L4D2_OnClientDisableAddons"
+MRESReturn DTR_AddonsDisabler(int pThis, DHookReturn hReturn, DHookParam hParams) // Forward "L4D2_OnClientDisableAddons"
 {
 	// Details on finding offsets can be found here: https://github.com/ProdigySim/left4dhooks/pull/1
 	// Big thanks to "ProdigySim" for updating for The Last Stand update.
